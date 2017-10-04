@@ -9,9 +9,12 @@
 echo
 echo " a valid user"
 echo
-TOKEN=`curl -H "Content-Type: application/json" -X POST -d '{"user":"user1","pass":"p1"}' http://localhost:8000/login/user1  | jq ".session" | tr -d '"'`
+curl -c cookies.txt -H "Content-Type: application/json" -X POST -d '{"user":"user1","pass":"p1"}' http://localhost:8000/login/user1  
 echo
 
-curl -H "Content-Type: application/json"  -X POST -d "{\"session\":\"${TOKEN}\"}"  http://localhost:8000/authcheck 
+curl -b cookies.txt -H "Content-Type: application/json"  -X POST -d "{\"session\":\"${TOKEN}\"}"  http://localhost:8000/testsession
+echo
+echo
+curl -H "Content-Type: application/json"  -X POST -d "{\"session\":\"${TOKEN}\"}"  http://localhost:8000/testsession
 echo
 echo

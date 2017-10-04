@@ -8,6 +8,7 @@ import (
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/securecookie"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -28,7 +29,7 @@ type Session struct {
 	Expires time.Time `json:"expires"`
 }
 
-type ErrorResponse struct {
+type MsgResponse struct {
 	Status  int    `json:"status"`
 	Message string `json:"message"`
 }
@@ -36,14 +37,16 @@ type ErrorResponse struct {
 const SESSION_DURATION time.Duration = 15 * 60 * time.Second
 const INVALIDLOGIN_RESPONSE string = "Invalid login"
 const INVALIDSESS_RESPONSE string = "Invalid session"
+const NOCOOKIE_RESPONSE string = "No cookie found.  please log in."
 
 var sessionMap map[string]time.Time
 var passwordMap map[string]string
 var hmacSecret []byte
+var sCookie *securecookie.SecureCookie
 
 func ReturnError(w http.ResponseWriter, s string) {
 	w.WriteHeader(http.StatusUnauthorized)
-	sobj := ErrorResponse{http.StatusUnauthorized, s}
+	sobj := MsgResponse{http.StatusUnauthorized, s}
 	resp, _ := json.Marshal(sobj)
 	w.Write(resp)
 }
@@ -84,9 +87,19 @@ func UserLoginHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Create token session error: %s\n", err)
 		ReturnError(w, INVALIDLOGIN_RESPONSE)
 	}
+	s := Session{Session: token}
+	if encoded, err := sCookie.Encode("session", s); err == nil {
+		cookie := &http.Cookie{
+			Name:  "session",
+			Value: encoded,
+			Path:  "/",
+		}
+		http.SetCookie(w, cookie)
+	} else {
+		log.Println("Error setting cookie", err)
+	}
+
 	w.WriteHeader(http.StatusOK)
-	resp, _ := json.Marshal(Session{Session: token})
-	w.Write(resp)
 }
 
 func hmacInit(keyName string) {
@@ -145,7 +158,7 @@ func CreateSessionToken(username string) (string, error) {
 	return token, err
 }
 
-func CheckAuth(tokenString string) bool {
+func verifyJWT(tokenString string) bool {
 	if v, ok := sessionMap[tokenString]; ok {
 		// test if v
 		now := time.Now()
@@ -177,17 +190,34 @@ func CheckAuth(tokenString string) bool {
 	return false
 }
 
-func AuthCheckHandler(w http.ResponseWriter, r *http.Request) {
+func IsValidSession(w http.ResponseWriter, r *http.Request) bool {
 	var s Session
-	b, _ := ioutil.ReadAll(r.Body)
-	json.Unmarshal(b, &s)
-
-	if CheckAuth(s.Session) {
-		w.WriteHeader(http.StatusOK)
-		w.Write(b)
+	if cookie, err := r.Cookie("session"); err == nil {
+		if err = sCookie.Decode("session", cookie.Value, &s); err != nil {
+			return false
+		}
 	} else {
-		ReturnError(w, INVALIDSESS_RESPONSE)
+		log.Println("No cookie found in request")
+		return false
 	}
+
+	if verifyJWT(s.Session) {
+		return true
+	} else {
+		return false
+	}
+}
+
+func TestSessionHandler(w http.ResponseWriter, r *http.Request) {
+	if !IsValidSession(w, r) {
+		ReturnError(w, INVALIDSESS_RESPONSE)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	sobj := MsgResponse{http.StatusOK, "testsession ok"}
+	resp, _ := json.Marshal(sobj)
+	w.Write(resp)
+
 }
 
 func main() {
@@ -203,9 +233,15 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var hashKey = securecookie.GenerateRandomKey(16)
+	var blockKey = securecookie.GenerateRandomKey(16)
+	sCookie = securecookie.New(hashKey, blockKey)
+
 	r := mux.NewRouter()
+	// this one function will be outside the auth check
 	r.HandleFunc("/login/{user}", UserLoginHandler).Methods("POST")
-	r.HandleFunc("/authcheck", AuthCheckHandler)
+
+	r.HandleFunc("/testsession", TestSessionHandler).Methods("POST")
 
 	loggedRouter := handlers.LoggingHandler(os.Stdout, r)
 	listenPort := ":8000"

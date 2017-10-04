@@ -18,6 +18,12 @@
 			"repository": "https://github.com/gorilla/mux",
 			"revision": "3f19343c7d9ce75569b952758bd236af94956061",
 			"branch": "master"
+		},
+		{
+			"importpath": "github.com/gorilla/securecookie",
+			"repository": "https://github.com/gorilla/securecookie",
+			"revision": "e59506cc896acb7f7bf732d4fdf5e25f7ccd8983",
+			"branch": "master"
 		}
 	]
 }
