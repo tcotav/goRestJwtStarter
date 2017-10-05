@@ -222,6 +222,8 @@ func TestSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 
+	runSecure := true
+
 	// just need some bytes for hmacInit -- maybe use a better source
 	hmacInit("passwd.cfg")
 	passwordMap = make(map[string]string)
@@ -246,6 +248,14 @@ func main() {
 	loggedRouter := handlers.LoggingHandler(os.Stdout, r)
 	listenPort := ":8000"
 	log.Printf("Listening at %s\n", listenPort)
-	// Bind to a port and pass our router in
-	log.Fatal(http.ListenAndServe(listenPort, loggedRouter))
+
+	if runSecure {
+		// load up the key and cert
+		keyPem := "server.key"
+		certPem := "server.crt"
+		// Bind to a port and pass our router in
+		log.Fatal(http.ListenAndServeTLS(listenPort, certPem, keyPem, loggedRouter))
+	} else {
+		log.Fatal(http.ListenAndServe(listenPort, loggedRouter))
+	}
 }
