@@ -1,0 +1,9 @@
+{
+  "listenPort":":8000",
+  "serverKey":"keys/server.key",
+  "serverCert":"keys/server.crt",
+  "userconf":"passwd.cfg",
+  "runSecure":"true",
+  "cookieKeyFile":"keys/cookiehash",
+  "hmacSecret":"keys/secret"
+}
