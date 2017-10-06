@@ -2,6 +2,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +12,7 @@ import (
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
+	"github.com/spf13/viper"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -102,11 +106,16 @@ func UserLoginHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func hmacInit(keyName string) {
-	if keyData, e := ioutil.ReadFile(keyName); e == nil {
-		hmacSecret = keyData
+func hmacInit(secretFile string) []byte {
+	if sData, e := ioutil.ReadFile(secretFile); e == nil {
+		return []byte(sData)
 	} else {
-		panic(e)
+		sData := securecookie.GenerateRandomKey(16)
+		err := ioutil.WriteFile(secretFile, sData, 0600)
+		if err != nil {
+			log.Fatal("Could not write secret file at: ", secretFile)
+		}
+		return sData
 	}
 }
 
@@ -220,41 +229,101 @@ func TestSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func GetOrGenHash(fileName string, secret []byte) string {
+	var retString string
+
+	// check if file exists at `filename`
+	if keyData, e := ioutil.ReadFile(fileName); e == nil {
+		// if it does, read it in and go on
+		retString = string(keyData)
+	} else {
+		log.Println("creating file: ", fileName)
+		// if it does not, generate it, save it to `filename`
+		h := hmac.New(sha256.New, secret)
+		h.Write(secret)
+		retString = base64.StdEncoding.EncodeToString(h.Sum(nil))
+		err := ioutil.WriteFile(fileName, []byte(retString), 0600)
+		if err != nil {
+			log.Fatal("Could not write hash file at: ", fileName)
+		}
+	}
+	// and go on
+	return retString
+}
+
+func GetCookieKeys(cookieKeyFile string) []string {
+	if keyData, e := ioutil.ReadFile(cookieKeyFile); e == nil {
+		keyLines := strings.Split(string(keyData), "\n")
+		if len(keyLines) != 2 {
+			log.Fatal("Invalid cookie key file: ", cookieKeyFile)
+		}
+		return keyLines
+	} else {
+		keyLines := make([]string, 2)
+		for i := 0; i < 2; i++ {
+			keyLines[i] = string(securecookie.GenerateRandomKey(16))
+		}
+		err := ioutil.WriteFile(cookieKeyFile, []byte(strings.Join(keyLines, "\n")), 0600)
+		if err != nil {
+			log.Fatal("Could not write cookie key file at: ", cookieKeyFile)
+		}
+		return keyLines
+	}
+}
+
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	runSecure := true
+	viper.SetConfigName("config") // name of config file (without extension)
+	viper.AddConfigPath("/etc/webjwt/")
+	viper.AddConfigPath("$HOME/.webjwt")
+	viper.AddConfigPath(".")
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("Fatal error config file: %s \n", err))
+	}
 
-	// just need some bytes for hmacInit -- maybe use a better source
-	hmacInit("passwd.cfg")
+	viper.SetDefault("listenPort", ":8000")
+	viper.SetDefault("serverKey", "key.pem")
+	viper.SetDefault("serverCert", "crt.pem")
+	viper.SetDefault("userconf", "passwd.cfg")
+	viper.SetDefault("runSecure", true)
+	viper.SetDefault("cookieKeyFile", "cookieKeys.txt")
+	viper.SetDefault("hmacSecret", "secret.txt")
+
+	listenPort := viper.GetString("listenPort")
+	userConf := viper.GetString("userconf")
+	cookieKeyFile := viper.GetString("cookieKeyFile")
+	serverKey := viper.GetString("serverKey")
+	serverCert := viper.GetString("serverCert")
+
+	// this is a global... might be a bad idea
+	hmacSecretFile := viper.GetString("hmacSecret")
+	hmacSecret = hmacInit(hmacSecretFile)
+	runSecure := viper.GetBool("runSecure")
+
 	passwordMap = make(map[string]string)
 	sessionMap = make(map[string]time.Time)
 
 	// load up the user config for logins
-	err := LoadUserConf("passwd.cfg")
+	err = LoadUserConf(userConf)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	var hashKey = securecookie.GenerateRandomKey(16)
-	var blockKey = securecookie.GenerateRandomKey(16)
-	sCookie = securecookie.New(hashKey, blockKey)
+	cookieKeys := GetCookieKeys(cookieKeyFile)
+	sCookie = securecookie.New([]byte(cookieKeys[0]), []byte(cookieKeys[1]))
 
 	r := mux.NewRouter()
 	// this one function will be outside the auth check
 	r.HandleFunc("/login/{user}", UserLoginHandler).Methods("POST")
-
 	r.HandleFunc("/testsession", TestSessionHandler).Methods("POST")
 
 	loggedRouter := handlers.LoggingHandler(os.Stdout, r)
-	listenPort := ":8000"
 	log.Printf("Listening at %s\n", listenPort)
-
 	if runSecure {
-		// load up the key and cert
-		keyPem := "server.key"
-		certPem := "server.crt"
-		// Bind to a port and pass our router in
-		log.Fatal(http.ListenAndServeTLS(listenPort, certPem, keyPem, loggedRouter))
+		// Bind to a port and pass our router in -- this takes in files
+		log.Fatal(http.ListenAndServeTLS(listenPort, serverCert, serverKey, loggedRouter))
 	} else {
 		log.Fatal(http.ListenAndServe(listenPort, loggedRouter))
 	}
