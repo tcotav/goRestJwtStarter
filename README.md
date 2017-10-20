@@ -53,7 +53,7 @@ openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650
 
 ### Logging 
 
-Defaults to stdout.  I should fix that maybe.
+Defaults to stdout.  I should fix that maybe.  Or just pipe it to some outfile.
 
 ### Libraries
 
