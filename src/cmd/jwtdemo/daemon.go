@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
+	//"github.com/gorilla/sessions"
 	"github.com/spf13/viper"
 	"io/ioutil"
 	"log"
@@ -43,7 +44,8 @@ const INVALIDLOGIN_RESPONSE string = "Invalid login"
 const INVALIDSESS_RESPONSE string = "Invalid session"
 const NOCOOKIE_RESPONSE string = "No cookie found.  please log in."
 
-var sessionMap map[string]time.Time
+var sessionMap map[string]Session
+var tokenMap map[string]time.Time
 var passwordMap map[string]string
 var hmacSecret []byte
 var sCookie *securecookie.SecureCookie
@@ -55,44 +57,41 @@ func ReturnError(w http.ResponseWriter, s string) {
 	w.Write(resp)
 }
 
+func checkUserPassword(lu LoginUser) bool {
+
+	if ppasswd, ok := passwordMap[lu.User]; ok {
+		// confirm password
+		if lu.Pass != ppasswd {
+			log.Print("invalid password")
+			return false
+		}
+		return true
+	} else {
+		log.Print(fmt.Sprintf("User %s not found in internal user list ", lu.User))
+		return false
+	}
+}
+
 // /login/{user} -- in the url for logging purposes
 func UserLoginHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	// login urlPathUser
-	urlPathUser := vars["user"]
 
 	var lu LoginUser
 	b, _ := ioutil.ReadAll(r.Body)
 	json.Unmarshal(b, &lu)
 
-	// do some checks
-	if lu.User != urlPathUser {
-		log.Print(fmt.Sprintf("url user, %s, does not match payload json user, %s", lu.User, urlPathUser))
+	if !checkUserPassword(lu) {
 		ReturnError(w, INVALIDLOGIN_RESPONSE)
-		return
 	}
 
-	// check if user exists in internal hash
-	if ppasswd, ok := passwordMap[urlPathUser]; ok {
-		// confirm password
-		if lu.Pass != ppasswd {
-			log.Print("invalid password")
-			ReturnError(w, INVALIDLOGIN_RESPONSE)
-			return
-		}
-	} else {
-		log.Print(fmt.Sprintf("User %s not found in internal user list ", urlPathUser))
-		ReturnError(w, INVALIDLOGIN_RESPONSE)
-		return
-	}
+	// so after this point -- they should be golden -- authN completed
+
 	// then return a session
-	token, err := CreateSessionToken(lu.User)
+	token, err := GetSessionToken(lu.User)
 	if err != nil {
 		log.Printf("Create token session error: %s\n", err)
 		ReturnError(w, INVALIDLOGIN_RESPONSE)
 	}
-	s := Session{Session: token}
-	if encoded, err := sCookie.Encode("session", s); err == nil {
+	if encoded, err := sCookie.Encode("session", token); err == nil {
 		cookie := &http.Cookie{
 			Name:  "session",
 			Value: encoded,
@@ -119,7 +118,7 @@ func hmacInit(secretFile string) []byte {
 	}
 }
 
-func getToken(luser string) (string, error) {
+func createUserToken(luser string) (string, error) {
 	// Create a new token object, specifying signing method and the claims
 	// you would like it to contain.
 	// see http://self-issued.info/docs/draft-ietf-oauth-json-web-token.html#rfc.section.4.1.5
@@ -153,25 +152,40 @@ func LoadUserConf(filename string) error {
 	return nil
 }
 
-func CreateSessionToken(username string) (string, error) {
+func GetSessionToken(username string) (string, error) {
 	if sessionMap == nil {
-		sessionMap = make(map[string]time.Time)
+		sessionMap = make(map[string]Session)
 	}
 
-	token, err := getToken(username)
+	// does user + token already exist?
+	if v, ok := sessionMap[username]; ok {
+		return v.Session, nil
+	}
+
+	// else we build one
+	token, err := createUserToken(username)
 	if err != nil {
 		log.Print(err)
 	}
 	log.Printf("token created: %s\n", token)
-	sessionMap[token] = time.Now()
+	tnow := time.Now()
+	tokenMap[token] = tnow
+	sessionMap[username] = Session{Session: token, User: username, Expires: tnow}
 	return token, err
 }
 
+func IsSessionExpired(t time.Time) bool {
+	now := time.Now()
+	if now.Sub(t) > SESSION_DURATION {
+		return true
+	}
+	return false
+}
+
 func verifyJWT(tokenString string) bool {
-	if v, ok := sessionMap[tokenString]; ok {
+	if v, ok := tokenMap[tokenString]; ok {
 		// test if v
-		now := time.Now()
-		if now.Sub(v) > SESSION_DURATION {
+		if IsSessionExpired(v) {
 			log.Print("Session expired.")
 			return false
 		} else {
@@ -200,7 +214,7 @@ func verifyJWT(tokenString string) bool {
 }
 
 func IsValidSession(w http.ResponseWriter, r *http.Request) bool {
-	var s Session
+	var s string
 	if cookie, err := r.Cookie("session"); err == nil {
 		if err = sCookie.Decode("session", cookie.Value, &s); err != nil {
 			return false
@@ -210,7 +224,7 @@ func IsValidSession(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
-	if verifyJWT(s.Session) {
+	if verifyJWT(s) {
 		return true
 	} else {
 		return false
@@ -303,7 +317,8 @@ func main() {
 	runSecure := viper.GetBool("runSecure")
 
 	passwordMap = make(map[string]string)
-	sessionMap = make(map[string]time.Time)
+	sessionMap = make(map[string]Session)
+	tokenMap = make(map[string]time.Time)
 
 	// load up the user config for logins
 	err = LoadUserConf(userConf)
@@ -316,7 +331,7 @@ func main() {
 
 	r := mux.NewRouter()
 	// this one function will be outside the auth check
-	r.HandleFunc("/login/{user}", UserLoginHandler).Methods("POST")
+	r.HandleFunc("/login", UserLoginHandler).Methods("POST")
 	r.HandleFunc("/testsession", TestSessionHandler).Methods("POST")
 
 	loggedRouter := handlers.LoggingHandler(os.Stdout, r)
