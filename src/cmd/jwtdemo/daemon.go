@@ -152,6 +152,21 @@ func LoadUserConf(filename string) error {
 	return nil
 }
 
+/*
+Encapsulating saving the sesssion
+*/
+func SaveSession(s Session) error {
+
+	sessionMap[s.User] = s
+	return nil
+}
+
+func GetSession(username string) (Session, error) {
+
+	v, _ := sessionMap[username]
+	return v, nil
+}
+
 func GetSessionToken(username string) (string, error) {
 	if sessionMap == nil {
 		sessionMap = make(map[string]Session)
@@ -170,7 +185,11 @@ func GetSessionToken(username string) (string, error) {
 	log.Printf("token created: %s\n", token)
 	tnow := time.Now()
 	tokenMap[token] = tnow
-	sessionMap[username] = Session{Session: token, User: username, Expires: tnow}
+	s := Session{Session: token, User: username, Expires: tnow}
+	err = SaveSession(s)
+	if err != nil {
+		log.Print(err)
+	}
 	return token, err
 }
 
