@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
 	//"github.com/gorilla/sessions"
+	"github.com/go-redis/redis"
 	"github.com/spf13/viper"
 	"io/ioutil"
 	"log"
@@ -29,7 +30,7 @@ type LoginUser struct {
 }
 
 type Session struct {
-	Session string    `json:"session"`
+	Token   string    `json:"token"`
 	User    string    `json:"user"`
 	Expires time.Time `json:"expires"`
 }
@@ -44,11 +45,12 @@ const INVALIDLOGIN_RESPONSE string = "Invalid login"
 const INVALIDSESS_RESPONSE string = "Invalid session"
 const NOCOOKIE_RESPONSE string = "No cookie found.  please log in."
 
-var sessionMap map[string]Session
+var userSessMap map[string]string
 var tokenMap map[string]time.Time
 var passwordMap map[string]string
 var hmacSecret []byte
 var sCookie *securecookie.SecureCookie
+var redisDb *redis.Client
 
 func ReturnError(w http.ResponseWriter, s string) {
 	w.WriteHeader(http.StatusUnauthorized)
@@ -156,25 +158,38 @@ func LoadUserConf(filename string) error {
 Encapsulating saving the sesssion
 */
 func SaveSession(s Session) error {
-
-	sessionMap[s.User] = s
-	return nil
+	userSessMap[s.User] = s.Token
+	keyExists, err := redisDb.SetNX(s.User, s.Token, sessionDuration).Result()
+	if keyExists { // bump the ttl of the key
+		setExpire, err2 := redisDb.Expire(s.User, sessionDuration).Result()
+		if !setExpire {
+			log.Print(fmt.Sprintf("Could not update expiration for user: %s", s.User))
+		}
+		err = err2
+	}
+	return err
 }
 
 func GetSession(username string) (Session, error) {
+	var err error
 
-	v, _ := sessionMap[username]
-	return v, nil
+	// try local cache
+	token, isPresent := userSessMap[username]
+	if !isPresent {
+		// then go to redis
+		token, err = redisDb.Get("key").Result()
+		if err != nil {
+			return Session{}, err
+		}
+	}
+	return Session{Token: token, User: username}, nil
 }
 
 func GetSessionToken(username string) (string, error) {
-	if sessionMap == nil {
-		sessionMap = make(map[string]Session)
-	}
 
 	// does user + token already exist?
-	if v, ok := sessionMap[username]; ok {
-		return v.Session, nil
+	if v, ok := userSessMap[username]; ok {
+		return v, nil
 	}
 
 	// else we build one
@@ -185,7 +200,7 @@ func GetSessionToken(username string) (string, error) {
 	log.Printf("token created: %s\n", token)
 	tnow := time.Now()
 	tokenMap[token] = tnow
-	s := Session{Session: token, User: username, Expires: tnow}
+	s := Session{Token: token, User: username, Expires: tnow}
 	err = SaveSession(s)
 	if err != nil {
 		log.Print(err)
@@ -304,6 +319,10 @@ func GetCookieKeys(cookieKeyFile string) []string {
 	}
 }
 
+var redisAddress, redisPassword, redisDatabase string
+var useRedis bool
+var sessionDuration time.Duration
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -323,6 +342,8 @@ func main() {
 	viper.SetDefault("runSecure", true)
 	viper.SetDefault("cookieKeyFile", "cookieKeys.txt")
 	viper.SetDefault("hmacSecret", "secret.txt")
+	viper.SetDefault("redis.use", false)
+	viper.SetDefault("sessionDuration", SESSION_DURATION)
 
 	listenPort := viper.GetString("listenPort")
 	userConf := viper.GetString("userconf")
@@ -330,13 +351,33 @@ func main() {
 	serverKey := viper.GetString("serverKey")
 	serverCert := viper.GetString("serverCert")
 
+	// redis config
+	useRedis := viper.GetBool("redis.use")
+	if useRedis {
+		redisAddress := viper.GetString("redis.address")
+		redisPassword := viper.GetString("redis.password")
+		redisDatabase := viper.GetInt("redis.database")
+
+		redisDb = redis.NewClient(&redis.Options{
+			Addr:     redisAddress,
+			Password: redisPassword,
+			DB:       redisDatabase,
+		})
+	}
+
+	sessionDuration, err = time.ParseDuration(viper.GetString("sessionDuration"))
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// this is a global... might be a bad idea
 	hmacSecretFile := viper.GetString("hmacSecret")
 	hmacSecret = hmacInit(hmacSecretFile)
 	runSecure := viper.GetBool("runSecure")
 
 	passwordMap = make(map[string]string)
-	sessionMap = make(map[string]Session)
+	userSessMap = make(map[string]string)
 	tokenMap = make(map[string]time.Time)
 
 	// load up the user config for logins

@@ -5,5 +5,12 @@
   "userconf":"passwd.cfg",
   "runSecure":"true",
   "cookieKeyFile":"keys/cookiehash",
-  "hmacSecret":"keys/secret"
+  "hmacSecret":"keys/secret",
+  "redis":{
+    "use":true,
+    "address":"localhost:6379",
+    "password":"",
+    "database":0
+  },
+  "sessionDuration":"1h"
 }
