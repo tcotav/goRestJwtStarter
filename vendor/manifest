@@ -104,6 +104,12 @@
 			"branch": "master"
 		},
 		{
+			"importpath": "github.com/patrickmn/go-cache",
+			"repository": "https://github.com/patrickmn/go-cache",
+			"revision": "5633e0862627c011927fa39556acae8b1f1df58a",
+			"branch": "master"
+		},
+		{
 			"importpath": "github.com/pelletier/go-toml",
 			"repository": "https://github.com/pelletier/go-toml",
 			"revision": "2009e44b6f182e34d8ce081ac2767622937ea3d4",

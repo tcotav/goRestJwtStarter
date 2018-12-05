@@ -9,11 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"github.com/dgrijalva/jwt-go"
+	"github.com/go-redis/redis"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/securecookie"
-	//"github.com/gorilla/sessions"
-	"github.com/go-redis/redis"
+	"github.com/patrickmn/go-cache"
 	"github.com/spf13/viper"
 	"io/ioutil"
 	"log"
@@ -40,17 +40,23 @@ type MsgResponse struct {
 	Message string `json:"message"`
 }
 
+const USER_KEY_PREFIX string = "US"
+const TOKEN_KEY_PREFIX string = "TK"
+
 const SESSION_DURATION time.Duration = 15 * 60 * time.Second
 const INVALIDLOGIN_RESPONSE string = "Invalid login"
 const INVALIDSESS_RESPONSE string = "Invalid session"
 const NOCOOKIE_RESPONSE string = "No cookie found.  please log in."
 
-var userSessMap map[string]string
-var tokenMap map[string]time.Time
 var passwordMap map[string]string
 var hmacSecret []byte
 var sCookie *securecookie.SecureCookie
 var redisDb *redis.Client
+
+var redisAddress, redisPassword, redisDatabase string
+var useRedis bool
+var sessionDuration time.Duration
+var localCache *cache.Cache
 
 func ReturnError(w http.ResponseWriter, s string) {
 	w.WriteHeader(http.StatusUnauthorized)
@@ -59,6 +65,10 @@ func ReturnError(w http.ResponseWriter, s string) {
 	w.Write(resp)
 }
 
+/*
+* Put whatever authorization mechanism is appropriate here -- i.e. ldap lookup.
+* We just use a simple config file -> map lookup
+ */
 func checkUserPassword(lu LoginUser) bool {
 
 	if ppasswd, ok := passwordMap[lu.User]; ok {
@@ -74,7 +84,7 @@ func checkUserPassword(lu LoginUser) bool {
 	}
 }
 
-// /login/{user} -- in the url for logging purposes
+// /login -- in the url for logging purposes
 func UserLoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	var lu LoginUser
@@ -86,7 +96,6 @@ func UserLoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// so after this point -- they should be golden -- authN completed
-
 	// then return a session
 	token, err := GetSessionToken(lu.User)
 	if err != nil {
@@ -104,6 +113,7 @@ func UserLoginHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println("Error setting cookie", err)
 	}
 
+	log.Print("Successful login for user: ", lu.User)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -154,95 +164,106 @@ func LoadUserConf(filename string) error {
 	return nil
 }
 
+func redisExistsBumpTTL(k string, v string) error {
+	localCache.Set(k, v, sessionDuration)
+	if !useRedis {
+		keyExists, err := redisDb.SetNX(k, v, sessionDuration).Result()
+		if keyExists { // bump the ttl of the key
+			setExpire, err2 := redisDb.Expire(k, sessionDuration).Result()
+			if !setExpire {
+				log.Print(fmt.Sprintf("Could not update expiration for key: %s", k))
+			}
+			err = err2
+		}
+		return err
+	}
+	return nil
+}
+
 /*
 Encapsulating saving the sesssion
 */
 func SaveSession(s Session) error {
-	userSessMap[s.User] = s.Token
-	keyExists, err := redisDb.SetNX(s.User, s.Token, sessionDuration).Result()
-	if keyExists { // bump the ttl of the key
-		setExpire, err2 := redisDb.Expire(s.User, sessionDuration).Result()
-		if !setExpire {
-			log.Print(fmt.Sprintf("Could not update expiration for user: %s", s.User))
-		}
-		err = err2
+
+	err := redisExistsBumpTTL(s.User, s.Token)
+	if err != nil {
+		return err
 	}
+	err = redisExistsBumpTTL(s.Token, s.User)
 	return err
 }
 
-func GetSession(username string) (Session, error) {
+func GetKV(k string) (string, error) {
 	var err error
-
+	var v string
 	// try local cache
-	token, isPresent := userSessMap[username]
+	vIf, isPresent := localCache.Get(k)
 	if !isPresent {
-		// then go to redis
-		token, err = redisDb.Get("key").Result()
-		if err != nil {
-			return Session{}, err
+		if !useRedis {
+			//then go to redis
+			v, err = redisDb.Get(k).Result()
+			if err != nil {
+				log.Println("Redis miss", k)
+				log.Println(err)
+				return "", err
+			}
+			return "", err
+		} else {
+			return "", errors.New("User not found")
 		}
+	} else {
+		v = fmt.Sprintf("%v", vIf)
 	}
-	return Session{Token: token, User: username}, nil
+	return v, nil
+}
+
+func GetSessionByToken(t string) (string, error) {
+	return GetKV(t)
+}
+
+func GetSessionByUser(username string) (string, error) {
+	return GetKV(username)
 }
 
 func GetSessionToken(username string) (string, error) {
 
 	// does user + token already exist?
-	if v, ok := userSessMap[username]; ok {
-		return v, nil
+	s, err := GetSessionByUser(username)
+	if err != nil {
+		return s, nil
 	}
+
+	log.Print("have to build session for user", username)
 
 	// else we build one
 	token, err := createUserToken(username)
 	if err != nil {
 		log.Print(err)
 	}
-	log.Printf("token created: %s\n", token)
-	tnow := time.Now()
-	tokenMap[token] = tnow
-	s := Session{Token: token, User: username, Expires: tnow}
-	err = SaveSession(s)
+	sess := Session{Token: token, User: username}
+	err = SaveSession(sess)
 	if err != nil {
 		log.Print(err)
 	}
 	return token, err
 }
 
-func IsSessionExpired(t time.Time) bool {
-	now := time.Now()
-	if now.Sub(t) > SESSION_DURATION {
-		return true
-	}
-	return false
-}
-
 func verifyJWT(tokenString string) bool {
-	if v, ok := tokenMap[tokenString]; ok {
-		// test if v
-		if IsSessionExpired(v) {
-			log.Print("Session expired.")
-			return false
-		} else {
-			token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-				// Don't forget to validate the alg is what you expect:
-				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
-				}
-
-				// hmacSampleSecret is a []byte containing your secret, e.g. []byte("my_secret_key")
-				return hmacSecret, nil
-			})
-
-			if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-				log.Printf("%s, %s", claims["foo"], claims["nbf"])
-				return true
-			} else {
-				log.Printf("Error in validating token: %s", err)
-				return false
-			}
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Don't forget to validate the alg is what you expect:
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
 		}
+
+		// hmacSampleSecret is a []byte containing your secret, e.g. []byte("my_secret_key")
+		return hmacSecret, nil
+	})
+
+	if _, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		return true
 	} else {
-		log.Printf("Session not in map: %s.\n", tokenString)
+		log.Printf("Error in validating token: %s", err)
+		return false
 	}
 	return false
 }
@@ -255,6 +276,18 @@ func IsValidSession(w http.ResponseWriter, r *http.Request) bool {
 		}
 	} else {
 		log.Println("No cookie found in request")
+		return false
+	}
+
+	// confirm it is in the map
+	username, err := GetSessionByToken(s)
+	if username != "" {
+		log.Println("session check for user: ", username)
+	} else if err != nil {
+		log.Println(err)
+		return false
+	} else {
+		log.Println("Session token not found or expired")
 		return false
 	}
 
@@ -319,10 +352,6 @@ func GetCookieKeys(cookieKeyFile string) []string {
 	}
 }
 
-var redisAddress, redisPassword, redisDatabase string
-var useRedis bool
-var sessionDuration time.Duration
-
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -366,10 +395,11 @@ func main() {
 	}
 
 	sessionDuration, err = time.ParseDuration(viper.GetString("sessionDuration"))
-
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	localCache = cache.New(sessionDuration, 10*time.Minute)
 
 	// this is a global... might be a bad idea
 	hmacSecretFile := viper.GetString("hmacSecret")
@@ -377,8 +407,6 @@ func main() {
 	runSecure := viper.GetBool("runSecure")
 
 	passwordMap = make(map[string]string)
-	userSessMap = make(map[string]string)
-	tokenMap = make(map[string]time.Time)
 
 	// load up the user config for logins
 	err = LoadUserConf(userConf)
