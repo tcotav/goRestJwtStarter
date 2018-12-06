@@ -164,7 +164,10 @@ func LoadUserConf(filename string) error {
 	return nil
 }
 
-func redisExistsBumpTTL(k string, v string) error {
+/*
+* reset the key TTL in all caches
+ */
+func resetKeyTTL(k string, v string) error {
 	localCache.Set(k, v, sessionDuration)
 	if !useRedis {
 		keyExists, err := redisDb.SetNX(k, v, sessionDuration).Result()
@@ -185,15 +188,15 @@ Encapsulating saving the sesssion
 */
 func SaveSession(s Session) error {
 
-	err := redisExistsBumpTTL(s.User, s.Token)
+	err := resetKeyTTL(s.User, s.Token)
 	if err != nil {
 		return err
 	}
-	err = redisExistsBumpTTL(s.Token, s.User)
+	err = resetKeyTTL(s.Token, s.User)
 	return err
 }
 
-func GetKV(k string) (string, error) {
+func GetKeyFromCache(k string) (string, error) {
 	var err error
 	var v string
 	// try local cache
@@ -204,12 +207,11 @@ func GetKV(k string) (string, error) {
 			v, err = redisDb.Get(k).Result()
 			if err != nil {
 				log.Println("Redis miss", k)
-				log.Println(err)
 				return "", err
 			}
 			return "", err
 		} else {
-			return "", errors.New("User not found")
+			return "", errors.New("key not found")
 		}
 	} else {
 		v = fmt.Sprintf("%v", vIf)
@@ -218,11 +220,11 @@ func GetKV(k string) (string, error) {
 }
 
 func GetSessionByToken(t string) (string, error) {
-	return GetKV(t)
+	return GetKeyFromCache(t)
 }
 
 func GetSessionByUser(username string) (string, error) {
-	return GetKV(username)
+	return GetKeyFromCache(username)
 }
 
 func GetSessionToken(username string) (string, error) {
@@ -232,8 +234,6 @@ func GetSessionToken(username string) (string, error) {
 	if err != nil {
 		return s, nil
 	}
-
-	log.Print("have to build session for user", username)
 
 	// else we build one
 	token, err := createUserToken(username)
